@@ -1,0 +1,335 @@
+/*
+name:	 tc.sac
+author:	 Kevin Klein
+compile: sac2c -o tc tc.sac
+run:	 ./tc
+descr.:	 SaC implementation of Tensor Comprehension kernels
+*/
+
+use Array: all;
+use StdIO: all;
+use CommandLine: {argc, argv};
+use String: {string};
+
+
+//---------------------------------------------------------
+// 1) MATRIX VECTOR PRODUCT
+//---------------------------------------------------------
+/*
+// Matrix Vector Product in TC
+def mv(float(M,K) A, float(K) x) → (C) {
+	C(i) = 0
+	C(i) += A(i,k) * x(k)
+}
+// or as a one liner...
+def mv(float(M,K) A, float(K) x) → (C) {
+	C(i) +=! A(i,k) * x(k)
+}
+*/
+// Matrix Vector Product in SaC
+
+float[.] mv(float[.,.] A, float[.] x)
+{
+	C = {[i] -> sum(A[[i,.]] * x[[.]])};
+	return(C);
+}
+
+//---------------------------------------------------------
+// 2) SGEEM BLAS
+//---------------------------------------------------------
+/*
+// SGEEM BLAS in TC
+def sgemm(float a, float b,
+float(N,M) A, float(M,K) B) → (C) {
+	# initialization
+	C(i,j) = b * C(i,j)
+	# accumulation
+	C(i,j) += a * A(i,k) * B(k,j)
+}
+*/
+// sgeem BLAS in SaC
+float[.,.] sgeem(float a, float b, float[.,.] A, float[.,.] B)
+{
+	// accumulation
+	C = {[i,j] -> sum(a * (A[[i,.]] * B[[.,j]]))};
+	// initialisation
+	C = {[i,j] -> b * C[[i,j]]};
+	return(C);
+}
+
+//-------------------------------------------------------------
+// 3) FULLY CONNECTED LAYER FOLLOWED BY A RECTIFIED LINEAR UNIT
+//-------------------------------------------------------------
+/*
+// CFRELU in TC
+def fcrelu(float(B,I) in, float(O,I) weight, float(I) bias) → (out) {
+	out(i,j) = bias(j)
+	out(b,o) += in(b,i) * weight(o,i)
+	out(i,j) = fmaxf(out(i,j), 0)
+}
+*/
+// CFRELU in SaC
+float[.,.] cfrelu(float[.,.] in, float[.,.] weight, float[.] bias)
+{
+	out = bias;
+	out = {[b,o] -> sum(in[[b,.]] * weight[[o,.]])};
+	out = {[i,j] -> maxval(out[[i,j]])};
+	return(out);
+}
+
+//---------------------------------------------------------
+// 4) 2-D CONVOLUTION
+//---------------------------------------------------------
+/*
+// 2-D Convolution in TC
+def conv2d(float(B,IP,H,W) in, float(OP,IP,KH,KW) weight) → (out) {
+	out(b,op,h,w) +=! in(b,ip,h+kh,w+kw) * weight(op,ip,kh,kw)
+}
+*/
+// 2-D Convolution in SaC
+float[.,.,.,.] conv2d(float[.,.,.,.] in, float[.,.,.,.] weight)
+{
+	in = ([[in[0,0,.,.], in[0,1,.,.]], [in[1,0,.,.] + weight[1,0,.,.], in[1,1,.,.] + weight[1,1,.,.]]]);
+	out = {[b,op,h,w] -> (sum(in[[b,op,.,.]] * weight[[.,.,h,w]]))};
+	return(out);
+}
+
+//---------------------------------------------------------
+// 5) MAX POOLING LAYER
+//---------------------------------------------------------
+/*
+// Max Pooling Layer in TC
+def maxpool2x2(float(B,C,H,W) in) → (out) {
+	out(b,c,i,j) max=! in(b,c, 2 * i + kw, 2 * j + kh)
+	where kw in 0:2, kh in 0:2
+}
+*/
+
+/*
+// maxpool2x2 in SaC
+// the where statement specifies the range of the variables in TC
+// so is this the same as the with-loop in SaC?
+float[.,.,.,.] maxpool2x2(float[.,.,.,.] in)
+{
+	out = with{
+		(0 <= kw,kh <= 2){
+		maxval(in[]);
+		}: ;
+	} genarray(,)
+
+
+	return(out);
+}
+*/
+//---------------------------------------------------------
+// 6) GATHER OPERATION
+//---------------------------------------------------------
+/*
+// gather operation in TC
+def gather(float(N) X, int(A,B) I) → (Z) {
+	Z(i,j) = X(I(i,j))
+}
+*/
+// gather operation in SaC
+// this is a  comnination of iterators and subscript expressions, how do I do this in SaC?
+float[.,.] gather(float[.] X, int[.,.] I)
+{
+	Z = {[i,j] -> X[I[i,j]]};
+	return(Z);
+}
+
+//---------------------------------------------------------
+// 7) STRIDED CONVOLUTION
+//---------------------------------------------------------
+/*
+// strided convolution in TC
+def sconv2d(int sh, int sw, float(N,C,H,W) I, float(F,C,KH,KW) W, float(F) B) → (O) {
+	O(n,f,h,w) = B(f)
+	O(n,f,h,w) += I(n,c, sh * h + kh, sw * w + kw) * W(f,c,kh,kw)
+}
+*/
+// strided convolution in SaC
+float[.,.,.,.] sconv2d(int sh, int sw, float[.,.,.,.] I, float[.,.,.,.] W, float[.] B)
+{
+	I = ([[I[0,0,.,.], I[0,1,.,.]], [I[1,0,.,.] * tof(sh) + W[1,0,.,.], I[1,1,.,.] + W[1,1,.,.] * tof(sw)]]);
+	O = {[n,f,h,w] -> (sum(I[[n,f,.,.]] * W[[.,.,h,w]]))};
+	return(O);
+}
+
+//---------------------------------------------------------
+// 8) 1-DIMENSIONAL CONVOLUTION
+//---------------------------------------------------------
+/*
+// 1-D Convolution in TC
+def conv1d(float(M) I, float(N) K) → (O) {
+	O(i) = K(x) * I(i + x)
+}
+
+*/
+/*
+// 1-D Convolution in SaC
+float[.] conv1d(float[.] I, float[.] K)
+{
+	O = {[i] -> K[.] * (I + [.])};
+	return(O);
+}
+*/
+//---------------------------------------------------------
+// 9) OUTER PRODUCT MATRIX MULTIPLICATION
+//---------------------------------------------------------
+/*
+// outer product matrix multiply in TC
+def outerProductMM(float(P,Q,R) A, float(S,R,T) B) → (O) {
+	O(p,s,q,t) +=! A(p,q,r) * B(s,r,t)
+}
+*/
+// outer product matrix multiply in SaC
+float[.,.,.,.] outerProductMM(float[.,.,.] A, float[.,.,.] B)
+{
+	O = {[p,s,q,t] -> sum(A[[p,q,.]] * B[[s,.,t]])};
+	return(O);
+}
+
+//---------------------------------------------------------
+// 10) TRANSPOSED MATRIX MULTIPLICATION
+//---------------------------------------------------------
+/*
+// transposed matrix multiply in TC
+def tmm(float(M,K) A, float(N,K) B) → (C) {
+	C(m,n) +=! A(m,kk) * B(n,kk)
+}
+*/
+// transposed matrix multiply in SaC
+float[.,.] tmm(float[.,.] A, float[.,.] B)
+{
+	C = {[m,n] -> sum(A[[m,.]] * B[[n,.]])};
+	return(C);
+}
+
+
+//---------------------------------------------------------
+// 11) TRANSPOSED BATCH MATRIX MULTIPLICATION
+//---------------------------------------------------------
+/*
+// transposed batch matrix multiply in TC
+def tbmm(float(B,N,M) X, float(B,K,M) Y) → (Z) {
+	Z(b,n,k) +=! X(b,n,m) * Y(b,k,m)
+}
+*/
+// transposed batch matrix multiply in SaC
+float[.,.,.] tbmm(float[.,.,.] X, float[.,.,.] Y)
+{
+	Z = {[b,n,k] -> sum(X[[b,n,.]] * Y[[b,k,.]])};
+	return(Z);
+}
+
+//---------------------------------------------------------
+// 12) GROUPED CONVOLUTIONS
+//---------------------------------------------------------
+/*
+def gconv(float(N,G,C,H,W) I,float(G,F,C,KH,KW) W1, float(M) B) → (O) {
+	O(n,g,o,h,w) +=! I(n,g,i, h + kh, w + kw) * W1(g,o,i,kh,kw)
+	O(n,g,o,h,w) = O(n,g,o,h,w) + B(m)
+}
+*/
+
+//---------------------------------------------------------
+// 13) 2 PARALLEL LOOKUP TABLES
+//---------------------------------------------------------
+/*
+// parallel lookup tables in TC
+def 2LUT(float(E1,D) LUT1, int(B,L1) I1, float(E2,D) LUT2, int(B,L2) I2) → (O1, O2) {
+	O1(i,j) +=! LUT1(I1(i,k),j)
+	O2(i,j) +=! LUT2(I2(i,k),j)
+}
+*/
+/*
+// parallel lookup tables in SaC
+float[.,.] 2LUT(float[.,.]LUT1, float[.,.]I1, float[.,.]LUT2, float[.,.]I2)
+{
+
+}
+*/
+
+int main()
+{
+/*
+	// 1) call MATRIX VECTOR PRODUCT
+	call = mv([[1f,2f,3f],[4f,5f,6f]], [1f,1f,1f]);
+	print(call);
+*/
+//---------------------------------------------------------
+/*
+	// 2) call SGEEM BLAS
+	call2 = sgeem(2f, 3f, [[1f,3f,5f],[7f,9f,11f]], [[0f,2f,4f],[6f,8f,10f]]);
+	print(call2);
+*/
+//---------------------------------------------------------
+/*
+	// 3) call FCRELU
+	call3 = cfrelu([[1f,3f,5f],[7f,9f,11f]], [[0f,2f,4f],[6f,8f,10f]], [3f]);
+	print(call3);
+*/
+//---------------------------------------------------------
+/*
+	// 4) call 2-D CONVOLUTION
+	mat1 = [[1f,2f],[3f,4f]];
+
+	in = [[mat1, mat1+4f], [mat1+8f, mat1+12f]];
+	weight = [[mat1+1f, mat1+2f], [mat1+3f, mat1+4f]];
+
+	call4 = conv2d(in,weight);
+	print(call4);
+*/
+//---------------------------------------------------------
+	// 5)
+
+//---------------------------------------------------------
+/*
+	// 6) call GATHER OPERATION
+	call6 = gather([1f,2f,3f],[[1,2,3],[4,5,6]]);
+	print(call6);
+*/
+//---------------------------------------------------------
+/*
+	// 7) call STRIDED CONVOLUTION
+	mat1 = [[1f,2f],[3f,4f]];
+	B = [1f,1f,1f];
+
+	I = [[mat1, mat1+4f], [mat1+8f, mat1+12f]];
+	W = [[mat1+1f, mat1+2f], [mat1+3f, mat1+4f]];
+
+	call7 = sconv2d(3,4,I,W,B);
+	print(call7);
+*/
+//---------------------------------------------------------
+/*
+	// 8) call 1D CONVOLUTION
+	call8 = conv1d([4f,5f,6f], [1f,1f,1f]);
+	print(call8);
+*/
+//---------------------------------------------------------
+/*
+	// 9) call OUTER PRODUCT MATRIX MULTIPLY
+	cube1 = [[[1f,2f,3f]],[[3f,4f,5f]]];
+	call9 = outerProductMM(cube1, cube1);
+	print(call9);
+*/
+//---------------------------------------------------------
+/*
+	// 10) call TRANSPOSED MATRIX MULTIPLY
+	mat1 = [[1f,2f],[3f,4f]];
+	//call10 = tmm(mat1, mat1);
+	//print(call10);
+*/
+//---------------------------------------------------------
+/*
+	// 11) call TRANSPOSED BATCH MATRIX MULTIPLICATION
+	cube1 = [[[1f,2f,3f]],[[3f,4f,5f]]];
+	call11 = tbmm(cube1, cube1);
+	print(call11);
+*/
+//---------------------------------------------------------
+
+	return 0;
+}
