@@ -27,11 +27,11 @@ def mv(float(M,K) A, float(K) x) → (C) {
 }
 */
 // Matrix Vector Product in SaC
-
+//
+noinline
 float[.] mv(float[.,.] A, float[.] x)
 {
-	C = {[i] -> sum(A[[i,.]] * x[[.]])};
-	return(C);
+   return{[i] -> sum({[k] -> A[[i,k]] * x[[k]]})};
 }
 
 //---------------------------------------------------------
@@ -47,13 +47,15 @@ float(N,M) A, float(M,K) B) → (C) {
 	C(i,j) += a * A(i,k) * B(k,j)
 }
 */
-// sgeem BLAS in SaC
-float[.,.] sgeem(float a, float b, float[.,.] A, float[.,.] B)
+// sgemm BLAS in SaC
+noinline
+float[.,.] sgemm(float a, float b, float[.,.] A, float[.,.] B, float[.,.] C)
 {
-	// accumulation
-	C = {[i,j] -> sum(a * (A[[i,.]] * B[[.,j]]))};
 	// initialisation
-	C = {[i,j] -> b * C[[i,j]]};
+  C = b * C;
+	// accumulation
+	C += {[i,j] -> sum({[k] -> a * (A[[i,k]] * B[[k,j]])})};
+
 	return(C);
 }
 
@@ -69,11 +71,13 @@ def fcrelu(float(B,I) in, float(O,I) weight, float(I) bias) → (out) {
 }
 */
 // CFRELU in SaC
-float[.,.] cfrelu(float[.,.] in, float[.,.] weight, float[.] bias)
+noinline
+float[.,.] fcrelu(float[.,.] in, float[.,.] weight, float[.] bias)
 {
-	out = bias;
-	out = {[b,o] -> sum(in[[b,.]] * weight[[o,.]])};
-	out = {[i,j] -> maxval(out[[i,j]])};
+	B = shape(in)[[0]];
+	out = genarray([B], bias);
+	out += {[b,o] -> sum({[i] -> in[[b,i]] * weight[[o,i]]})};
+	out = max(out, 0f);
 	return(out);
 }
 
@@ -87,11 +91,14 @@ def conv2d(float(B,IP,H,W) in, float(OP,IP,KH,KW) weight) → (out) {
 }
 */
 // 2-D Convolution in SaC
+noinline
 float[.,.,.,.] conv2d(float[.,.,.,.] in, float[.,.,.,.] weight)
 {
-	in = ([[in[0,0,.,.], in[0,1,.,.]], [in[1,0,.,.] + weight[1,0,.,.], in[1,1,.,.] + weight[1,1,.,.]]]);
-	out = {[b,op,h,w] -> (sum(in[[b,op,.,.]] * weight[[.,.,h,w]]))};
-	return(out);
+  lb = 0*shape(in);
+  ub = shape(in) - [0,0,shape(weight)[[2]], shape(weight)[[3]]];
+  return with{
+    (lb <= [b,op,h,w] < ub) : sum({[ip,kh,kw] -> in[[b,ip,h+kh,w+kw]] * weight[[op,ip,kh,kw]]});
+  } : modarray(in);
 }
 
 //---------------------------------------------------------
@@ -105,22 +112,19 @@ def maxpool2x2(float(B,C,H,W) in) → (out) {
 }
 */
 
-/*
 // maxpool2x2 in SaC
-// the where statement specifies the range of the variables in TC
-// so is this the same as the with-loop in SaC?
+noinline
 float[.,.,.,.] maxpool2x2(float[.,.,.,.] in)
 {
-	out = with{
-		(0 <= kw,kh <= 2){
-		maxval(in[]);
-		}: ;
-	} genarray(,)
-
-
-	return(out);
+  lb = 0*shape(in);
+  ub = [shape(in)[0], shape(in)[1], (shape(in)[2]-3)/2, (shape(in)[3]-3)/2];
+  return with {
+    (lb <= [b,c,i,j] < ub) : maxval(with{
+      ([0,0] <= [kw,kh] <= [2,2]) : in[[b,c,2*i+kw,2*j+kh]];
+    } : genarray([3,3], 0f));
+  } : modarray(in);
 }
-*/
+
 //---------------------------------------------------------
 // 6) GATHER OPERATION
 //---------------------------------------------------------
@@ -132,14 +136,14 @@ def gather(float(N) X, int(A,B) I) → (Z) {
 */
 // gather operation in SaC
 // this is a  comnination of iterators and subscript expressions, how do I do this in SaC?
+noinline
 float[.,.] gather(float[.] X, int[.,.] I)
 {
-	Z = {[i,j] -> X[I[i,j]]};
-	return(Z);
+  return {[i,j] -> X[I[[i,j]]]};
 }
-
 //---------------------------------------------------------
 // 7) STRIDED CONVOLUTION
+
 //---------------------------------------------------------
 /*
 // strided convolution in TC
@@ -148,32 +152,41 @@ def sconv2d(int sh, int sw, float(N,C,H,W) I, float(F,C,KH,KW) W, float(F) B) �
 	O(n,f,h,w) += I(n,c, sh * h + kh, sw * w + kw) * W(f,c,kh,kw)
 }
 */
+
 // strided convolution in SaC
+noinline
 float[.,.,.,.] sconv2d(int sh, int sw, float[.,.,.,.] I, float[.,.,.,.] W, float[.] B)
 {
-	I = ([[I[0,0,.,.], I[0,1,.,.]], [I[1,0,.,.] * tof(sh) + W[1,0,.,.], I[1,1,.,.] + W[1,1,.,.] * tof(sw)]]);
-	O = {[n,f,h,w] -> (sum(I[[n,f,.,.]] * W[[.,.,h,w]]))};
-	return(O);
+	f = shape(I)[[0]];
+	O = genarray([f], B);
+	lb = 0*shape(I);
+	ub = shape(I) - [0,0,shape(W)[[2]], shape(W)[[3]]];
+	return with{
+    (lb <= [n,f,h,w] < ub) : sum({[c,kh,kw] -> I[[n,c,sh*h+kh,sw*w+kw]] * W[[f,c,kh,kw]]});
+  } : modarray(I);
 }
 
 //---------------------------------------------------------
 // 8) 1-DIMENSIONAL CONVOLUTION
 //---------------------------------------------------------
 /*
-// 1-D Convolution in TC
+// 1-D Convolution in TCshape(K)[[0]]
 def conv1d(float(M) I, float(N) K) → (O) {
 	O(i) = K(x) * I(i + x)
 }
-
 */
-/*
+
 // 1-D Convolution in SaC
+noinline
 float[.] conv1d(float[.] I, float[.] K)
 {
-	O = {[i] -> K[.] * (I + [.])};
-	return(O);
+  lb = 0*shape(I);
+  ub = shape(I) - shape(K);
+  return with{
+    (lb <= [i] < ub) : sum({[x] -> K[[x]] * I[[i + x]]});
+  } : modarray(I); // don't understand this, whether you choose K or I affects the result...
 }
-*/
+
 //---------------------------------------------------------
 // 9) OUTER PRODUCT MATRIX MULTIPLICATION
 //---------------------------------------------------------
@@ -184,6 +197,7 @@ def outerProductMM(float(P,Q,R) A, float(S,R,T) B) → (O) {
 }
 */
 // outer product matrix multiply in SaC
+noinline
 float[.,.,.,.] outerProductMM(float[.,.,.] A, float[.,.,.] B)
 {
 	O = {[p,s,q,t] -> sum(A[[p,q,.]] * B[[s,.,t]])};
@@ -200,12 +214,12 @@ def tmm(float(M,K) A, float(N,K) B) → (C) {
 }
 */
 // transposed matrix multiply in SaC
+noinline
 float[.,.] tmm(float[.,.] A, float[.,.] B)
 {
 	C = {[m,n] -> sum(A[[m,.]] * B[[n,.]])};
 	return(C);
 }
-
 
 //---------------------------------------------------------
 // 11) TRANSPOSED BATCH MATRIX MULTIPLICATION
@@ -217,6 +231,7 @@ def tbmm(float(B,N,M) X, float(B,K,M) Y) → (Z) {
 }
 */
 // transposed batch matrix multiply in SaC
+noinline
 float[.,.,.] tbmm(float[.,.,.] X, float[.,.,.] Y)
 {
 	Z = {[b,n,k] -> sum(X[[b,n,.]] * Y[[b,k,.]])};
@@ -227,11 +242,25 @@ float[.,.,.] tbmm(float[.,.,.] X, float[.,.,.] Y)
 // 12) GROUPED CONVOLUTIONS
 //---------------------------------------------------------
 /*
+// grouped convolutions in TC
 def gconv(float(N,G,C,H,W) I,float(G,F,C,KH,KW) W1, float(M) B) → (O) {
 	O(n,g,o,h,w) +=! I(n,g,i, h + kh, w + kw) * W1(g,o,i,kh,kw)
 	O(n,g,o,h,w) = O(n,g,o,h,w) + B(m)
 }
 */
+// grouped convolutions in SaC
+noinline
+float[.,.,.,.,.] gconv(float[.,.,.,.,.] I, float[.,.,.,.,.] W1, float[.] B)
+{
+	lb = 0*shape(I);
+	ub = shape(I) - [0,0,0,shape(W1)[3], shape(W1)[4]];
+
+	O = with{
+		(lb <= [n,g,o,h,w] < ub) : sum({[i,kh,kw] -> I[n,g,i,h+kh,w+kw] * W1[g,o,i,kh,kw]});
+	} : modarray(I);
+  O = {[n,g,o,h,w] -> sum({[m] -> O[n,g,o,h,w] * B[[m]]})};
+  return(O);
+}
 
 //---------------------------------------------------------
 // 13) 2 PARALLEL LOOKUP TABLES
@@ -243,70 +272,90 @@ def 2LUT(float(E1,D) LUT1, int(B,L1) I1, float(E2,D) LUT2, int(B,L2) I2) → (O1
 	O2(i,j) +=! LUT2(I2(i,k),j)
 }
 */
-/*
+
 // parallel lookup tables in SaC
-float[.,.] 2LUT(float[.,.]LUT1, float[.,.]I1, float[.,.]LUT2, float[.,.]I2)
+noinline
+float[.,.], float[.,.] LUT2(float[.,.]LUT1, int[.,.] I1, float[.,.] LUT2, int[.,.] I2)
 {
-
+  // No shape information found for index scalar 'j'.
+  O1 = {[i,j] -> sum({[k] -> LUT1[ I1[i, k], j] })};
+  O2 = {[i,j] -> sum({[k] -> LUT2[ I2[i, k], j] })};
+  return(O1, O2);
 }
-*/
 
+
+//---------------------------------------------------------
+// MAIN FUNCTION
+//---------------------------------------------------------
 int main()
 {
+
+#define M 20
+#define N 22
+#define K 12
+#define B 20
+#define IP 22
+#define H 24
+#define W 26
+#define OP 28
+#define KH 3
+#define KW 3
+#define G 25
+#define C 20
+#define F 23
+
 /*
 	// 1) call MATRIX VECTOR PRODUCT
-	call = mv([[1f,2f,3f],[4f,5f,6f]], [1f,1f,1f]);
-	print(call);
+  A = genarray([M,K], 2f);
+  x = genarray([K], 3f);
+	print(mv(A, x));
 */
 //---------------------------------------------------------
-/*
 	// 2) call SGEEM BLAS
-	call2 = sgeem(2f, 3f, [[1f,3f,5f],[7f,9f,11f]], [[0f,2f,4f],[6f,8f,10f]]);
-	print(call2);
+/*
+  A = genarray([N,M], 2f);
+  B = genarray([M,K], 3f);
+  C = genarray([N,K], 4f);
+	print(sgemm(2f, 3f, A, B, C));
 */
 //---------------------------------------------------------
 /*
 	// 3) call FCRELU
-	call3 = cfrelu([[1f,3f,5f],[7f,9f,11f]], [[0f,2f,4f],[6f,8f,10f]], [3f]);
-	print(call3);
+  A = genarray([N,M], 2f);
+  B = genarray([M,K], 3f);
+	print(fcrelu(B, C, x));
 */
 //---------------------------------------------------------
 /*
 	// 4) call 2-D CONVOLUTION
-	mat1 = [[1f,2f],[3f,4f]];
-
-	in = [[mat1, mat1+4f], [mat1+8f, mat1+12f]];
-	weight = [[mat1+1f, mat1+2f], [mat1+3f, mat1+4f]];
-
-	call4 = conv2d(in,weight);
-	print(call4);
+  in = genarray([B,IP,H,W], 2f);
+  weight = genarray([OP,IP,KH,KW], 3f);
+	print(conv2d(in,weight));
 */
 //---------------------------------------------------------
-	// 5)
-
+/*
+	// 5) call Max Pooling
+  in = genarray([B,IP,H,W], 2f);
+  print(maxpool2x2(in));
+*/
 //---------------------------------------------------------
 /*
 	// 6) call GATHER OPERATION
-	call6 = gather([1f,2f,3f],[[1,2,3],[4,5,6]]);
-	print(call6);
+  I = reshape([M, N], iota(M * N));
+  v = genarray([M * N], 2f);
+	print(gather(v, I));
 */
 //---------------------------------------------------------
 /*
 	// 7) call STRIDED CONVOLUTION
-	mat1 = [[1f,2f],[3f,4f]];
-	B = [1f,1f,1f];
-
-	I = [[mat1, mat1+4f], [mat1+8f, mat1+12f]];
-	W = [[mat1+1f, mat1+2f], [mat1+3f, mat1+4f]];
-
-	call7 = sconv2d(3,4,I,W,B);
-	print(call7);
+	I = genarray([B,IP,H,W], 2f);
+	V = genarray([B,IP,H,W], 2f);
+	print(sconv2d(3,4,I,V,[3f]));
 */
 //---------------------------------------------------------
 /*
 	// 8) call 1D CONVOLUTION
-	call8 = conv1d([4f,5f,6f], [1f,1f,1f]);
-	print(call8);
+	print(conv1d([2f,3f],[4f,5f]));
 */
 //---------------------------------------------------------
 /*
@@ -330,6 +379,23 @@ int main()
 	print(call11);
 */
 //---------------------------------------------------------
+/*
+	// 12) call gconv
+	I = genarray([N,G,C,H,W], 2f);
+	W1 = genarray([G,F,C,KH,KW], 3f);
+	print(gconv(I, W1,[3f]));
+*/
+//---------------------------------------------------------
+/*
+  // 13) call 2LUT
+  mat1 = [[1f,2f],[3f,4f]];
+  mat2 = [[1,2],[3,4]];
+  mat3 = [[5f,6f],[7f,8f]];
+  mat4 = [[5,6],[7,8]];
+  res1, res2 = LUT2(mat1,mat2,mat3,mat4);
+  print(res1);
+  print(res2);
+*/
 
 	return 0;
 }
