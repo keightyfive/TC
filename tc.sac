@@ -111,7 +111,6 @@ def maxpool2x2(float(B,C,H,W) in) → (out) {
 	where kw in 0:2, kh in 0:2
 }
 */
-
 // maxpool2x2 in SaC
 noinline
 float[.,.,.,.] maxpool2x2(float[.,.,.,.] in)
@@ -143,7 +142,6 @@ float[.,.] gather(float[.] X, int[.,.] I)
 }
 //---------------------------------------------------------
 // 7) STRIDED CONVOLUTION
-
 //---------------------------------------------------------
 /*
 // strided convolution in TC
@@ -152,7 +150,6 @@ def sconv2d(int sh, int sw, float(N,C,H,W) I, float(F,C,KH,KW) W, float(F) B) �
 	O(n,f,h,w) += I(n,c, sh * h + kh, sw * w + kw) * W(f,c,kh,kw)
 }
 */
-
 // strided convolution in SaC
 noinline
 float[.,.,.,.] sconv2d(int sh, int sw, float[.,.,.,.] I, float[.,.,.,.] W, float[.] B)
@@ -175,7 +172,6 @@ def conv1d(float(M) I, float(N) K) → (O) {
 	O(i) = K(x) * I(i + x)
 }
 */
-
 // 1-D Convolution in SaC
 noinline
 float[.] conv1d(float[.] I, float[.] K)
@@ -272,7 +268,6 @@ def 2LUT(float(E1,D) LUT1, int(B,L1) I1, float(E2,D) LUT2, int(B,L2) I2) → (O1
 	O2(i,j) +=! LUT2(I2(i,k),j)
 }
 */
-
 // parallel lookup tables in SaC
 noinline
 float[.,.], float[.,.] LUT2(float[.,.]LUT1, int[.,.] I1, float[.,.] LUT2, int[.,.] I2)
@@ -289,7 +284,6 @@ float[.,.], float[.,.] LUT2(float[.,.]LUT1, int[.,.] I1, float[.,.] LUT2, int[.,
 //---------------------------------------------------------
 int main()
 {
-
 #define M 20
 #define N 22
 #define K 12
